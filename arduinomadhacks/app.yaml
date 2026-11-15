@@ -4,4 +4,5 @@ ports: []
 bricks:
 - arduino:web_ui: {}
 - arduino:motion_detection: {}
+- arduino:video_object_detection: {}
 icon: 🐍
