@@ -1,0 +1,37 @@
+services:
+  ei-motion-detection-runner:
+    user: 1000:1000
+    labels:
+      cc.arduino.app: "true"
+      cc.arduino.app.path: /home/arduino/ArduinoApps/arduinomadhacks
+    environment:
+      APP_HOME: /home/arduino/ArduinoApps/arduinomadhacks
+      CUSTOM_MODEL_PATH: /home/arduino/.arduino-bricks/ei-models/
+      EI_MOTION_DETECTION_MODEL: /models/ootb/ei/updown-wave-motion-detection.eim
+      EI_OBJ_DETECTION_MODEL: /models/ootb/ei/yolo-x-nano.eim
+      HOST_IP: 192.168.137.128
+      VIDEO_DEVICE: /dev/video0
+  ei-video-obj-detection-runner:
+    user: 1000:1000
+    devices:
+    - /dev/video0
+    - /dev/video1
+    - /dev/video2
+    - /dev/video3
+    - /dev/snd
+    - /dev/dri
+    group_add:
+    - dialout
+    - video
+    - audio
+    - render
+    labels:
+      cc.arduino.app: "true"
+      cc.arduino.app.path: /home/arduino/ArduinoApps/arduinomadhacks
+    environment:
+      APP_HOME: /home/arduino/ArduinoApps/arduinomadhacks
+      CUSTOM_MODEL_PATH: /home/arduino/.arduino-bricks/ei-models/
+      EI_MOTION_DETECTION_MODEL: /models/ootb/ei/updown-wave-motion-detection.eim
+      EI_OBJ_DETECTION_MODEL: /models/ootb/ei/yolo-x-nano.eim
+      HOST_IP: 192.168.137.128
+      VIDEO_DEVICE: /dev/video0
