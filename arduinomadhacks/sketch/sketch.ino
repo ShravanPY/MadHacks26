@@ -1,48 +1,28 @@
-// SPDX-FileCopyrightText: Copyright (C) 2025 ARDUINO SA <http://www.arduino.cc>
-//
-// SPDX-License-Identifier: MPL-2.0
+// Dig In - MCU side (STM32)
+// Reads the Modulino Movement every 16 ms (62.5 Hz) and sends the
+// acceleration (in g) to Python over the Bridge.
 
 #include <Arduino_RouterBridge.h>
 #include <Modulino.h>
 
-// Create a ModulinoMovement object
-ModulinoMovement movement;
+ModulinoMovement imu;
 
-float x_accel, y_accel, z_accel; // Accelerometer values in g
-
-unsigned long previousMillis = 0; // Stores last time values were updated
-const long interval = 16;         // Interval at which to read (16ms) - sampling rate of 62.5Hz and should be adjusted based on model definition
-int has_movement = 0;             // Flag to indicate if movement data is available
+const unsigned long SAMPLE_MS = 16;
+unsigned long lastSample = 0;
 
 void setup() {
   Bridge.begin();
-
-  // Initialize Modulino I2C communication
+  // The Qwiic connector on the UNO Q is the second I2C bus (Wire1).
+  // If this line fails to compile, change it to: Modulino.begin();
   Modulino.begin(Wire1);
-
-  // Detect and connect to movement sensor module
-  while (!movement.begin()) {
-    delay(1000);
-  }
+  imu.begin();
 }
 
 void loop() {
-  unsigned long currentMillis = millis(); // Get the current time
+  unsigned long now = millis();
+  if (now - lastSample < SAMPLE_MS) return;
+  lastSample = now;
 
-  if (currentMillis - previousMillis >= interval) {
-    // Save the last time you updated the values
-    previousMillis = currentMillis;
-
-    // Read new movement data from the sensor
-    has_movement = movement.update();
-    if(has_movement == 1) {
-      // Get acceleration values
-      x_accel = movement.getX();
-      y_accel = movement.getY();
-      z_accel = movement.getZ();
-    
-      Bridge.notify("record_sensor_movement", x_accel, y_accel, z_accel);      
-    }
-    
-  }
+  imu.update();
+  Bridge.notify("record_sensor_movement", imu.getX(), imu.getY(), imu.getZ());
 }
