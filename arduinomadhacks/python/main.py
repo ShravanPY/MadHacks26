@@ -32,6 +32,15 @@ BITE_MIN_S, BITE_MAX_S = 0.4, 8.0
 
 CHANGE_FLAG = 0.25          # flag when 25% worse than the person's baseline
 
+# Camera: the object detection Brick watches for a person at the table.
+USE_CAMERA = True           # set to False to run without the camera and its Brick
+PERSON_CONFIDENCE = 0.5
+PRESENT_HOLD_S = 3.0        # "at the table" lasts this long after the last sighting
+AUTO_MEALS = True           # sitting down starts the meal, getting up ends it
+SIT_S = 5.0                 # in view this long -> resting position is recorded and the meal starts
+AUTO_END_AWAY_S = 5.0       # out of view this long -> the meal ends
+MIN_MEAL_S = 10.0           # shorter meals with no bites are thrown away
+
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "sessions.json")
 
 ui = WebUI()
@@ -77,6 +86,7 @@ bite_start = 0.0
 bite_strengths = []
 
 tremor_on = False
+tremor_started = 0.0        # when the current tremor began
 on_count = off_count = 0
 
 
@@ -115,28 +125,46 @@ def save_sessions():
         print("could not save sessions:", e)
 
 
+clock_skew = 0.0            # browser clock minus board clock (the board's clock is often wrong)
+tz_offset_min = 0           # browser's minutes behind UTC
+
+
+def local_label():
+    t = time.gmtime(time.time() + clock_skew - tz_offset_min * 60)
+    return time.strftime("%b %d, %I:%M %p", t).replace(" 0", " ")
+
+
 def start_meal(label=None):
     global meal, in_bite
     if meal is not None:
         return
     in_bite = False
+    label = label or local_label()
     meal = {"start": time.time(), "label": label, "bites": [], "rest": [], "action": [],
-            "freqs": [], "episodes": 0}
+            "freqs": [], "episodes": 0, "spans": [],   # spans: [start_s, end_s or None]
+            "away": 0.0, "away_run": 0.0, "seen_person": False}
 
 
-def end_meal():
+def end_meal(trim=0.0):
+    """trim: seconds to drop from the end (the wait before an automatic end)."""
     global meal
     if meal is None:
         return
     m, meal = meal, None
-    duration = time.time() - m["start"]
+    duration = max(1.0, time.time() - m["start"] - trim)
+    if m["spans"] and m["spans"][-1][1] is None:
+        m["spans"][-1][1] = round(duration, 1)
     n = len(m["bites"])
+    if n == 0 and duration < MIN_MEAL_S:
+        return                                  # someone just walked past: not a meal
+    active = max(1.0, duration - m["away"])     # time away from the table doesn't count
     avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None
     sessions.append({
         "date": m["label"] or time.strftime("%b %d, %H:%M", time.localtime(m["start"])),
         "duration_s": round(duration, 1),
         "bites": n,
-        "sec_per_bite": round(duration / n, 1) if n else None,
+        "sec_per_bite": round(active / n, 1) if n else None,
+        "away_s": round(m["away"]),
         "tremor_rest": avg(m["rest"]),
         "tremor_eating": avg(m["action"]),
         "tremor_hz": avg(m["freqs"]),
@@ -180,7 +208,7 @@ status = {"sensor": "no_data", "rate": 0}
 
 def record_sensor_movement(x: float, y: float, z: float):
     global gravity, since_last, in_bite, bite_start, bite_strengths, last_live
-    global last_sample_time, samples_this_second, tremor_on, on_count, off_count
+    global last_sample_time, samples_this_second, tremor_on, tremor_started, on_count, off_count
     a = (x * G, y * G, z * G)
     now = time.time()
     with lock:
@@ -209,15 +237,17 @@ def record_sensor_movement(x: float, y: float, z: float):
     with lock:
         status["sensor"] = "flat" if spread < 1e-4 else "ok"
 
-        started = False
+        started = stopped = False
         if strength >= TREMOR_MIN and rhythm >= RHYTHM_MIN:
             on_count, off_count = on_count + 1, 0
             if not tremor_on and on_count >= ON_READINGS:
                 tremor_on = started = True
+                tremor_started = now
         else:
             off_count, on_count = off_count + 1, 0
             if tremor_on and off_count >= OFF_READINGS:
                 tremor_on = False
+                stopped = True
 
         if in_bite:
             bite_strengths.append(strength)
@@ -225,8 +255,15 @@ def record_sensor_movement(x: float, y: float, z: float):
             (meal["action"] if in_bite else meal["rest"]).append(strength)
             if tremor_on:
                 meal["freqs"].append(hz)
+            elapsed_now = round(now - meal["start"], 1)
             if started:
                 meal["episodes"] += 1
+                meal["spans"].append([elapsed_now, None])
+            elif tremor_on and not meal["spans"]:
+                meal["spans"].append([0.0, None])      # tremor was already going when the meal began
+                meal["episodes"] += 1
+            if stopped and meal["spans"] and meal["spans"][-1][1] is None:
+                meal["spans"][-1][1] = elapsed_now
             if bite_done:
                 avg_bite = sum(bite_strengths) / len(bite_strengths) if bite_strengths else strength
                 meal["bites"].append({"t": round(now - meal["start"], 1), "tremor": round(avg_bite, 3)})
@@ -235,11 +272,15 @@ def record_sensor_movement(x: float, y: float, z: float):
             "tremor_on": tremor_on, "rhythm": round(rhythm, 2),
             "bite_list": meal["bites"][-300:] if meal else [],
             "episodes": meal["episodes"] if meal else 0,
+            "episode_list": [[a, b if b is not None else round(now - meal["start"], 1)]
+                             for a, b in meal["spans"][-200:]] if meal else [],
+            "tremor_for": round(now - tremor_started, 1) if tremor_on else 0,
             "raw": [round(v, 2) for v in a],
             "in_bite": in_bite, "calibrated": rest is not None,
             "meal_active": meal is not None,
             "bites": len(meal["bites"]) if meal else 0,
             "elapsed": round(now - meal["start"]) if meal else 0,
+            "away": round(meal["away"]) if meal else 0,
         }
         live = last_live
     ui.send_message("live", live)
@@ -257,8 +298,12 @@ def on_calibrate(sid, data):
 
 
 def on_start(sid, data):
+    """Manual start: the hand's current position becomes the resting position."""
+    global rest
     label = data.get("label") if isinstance(data, dict) else None
     with lock:
+        if meal is None and gravity is not None:
+            rest = gravity
         start_meal(label)
 
 
@@ -269,6 +314,16 @@ def on_end(sid, data):
 
 def on_history(sid, data):
     send_history()
+
+
+def on_clock(sid, data):
+    """The page tells the board what time it really is."""
+    global clock_skew, tz_offset_min
+    try:
+        clock_skew = float(data["now"]) - time.time()
+        tz_offset_min = int(data["offset_min"])
+    except Exception:
+        pass
 
 
 def on_demo_history(sid, data):
@@ -302,6 +357,7 @@ ui.on_message("calibrate", on_calibrate)
 ui.on_message("start_meal", on_start)
 ui.on_message("end_meal", on_end)
 ui.on_message("get_history", on_history)
+ui.on_message("clock", on_clock)
 ui.on_message("demo_history", on_demo_history)
 ui.on_message("clear_history", on_clear)
 
@@ -322,6 +378,76 @@ ui.expose_api("GET", "/do/demo_history", lambda: on_demo_history(None, {}) or {"
 ui.expose_api("GET", "/do/clear_history", lambda: on_clear(None, {}) or {"ok": True})
 
 
+# ---------- camera: the object detection Brick says whether someone is at the table ----------
+
+camera = {"state": "off", "detail": "", "present": False, "labels": [], "reports": 0}
+person_last_seen = 0.0
+person_since = 0.0          # start of the current unbroken sighting
+last_report = 0.0
+
+
+def labels_in(detections):
+    """The Brick's result format has changed between versions, so accept dicts or lists."""
+    found = {}
+    if isinstance(detections, dict):
+        items = detections.get("detection", detections)
+    else:
+        items = detections
+    if isinstance(items, dict):
+        for label, value in items.items():
+            conf = value.get("confidence", 1.0) if isinstance(value, dict) else value
+            found[str(label).lower()] = conf
+    elif isinstance(items, (list, tuple)):
+        for d in items:
+            if isinstance(d, dict):
+                label = d.get("class_name") or d.get("label") or d.get("content")
+                if label:
+                    found[str(label).lower()] = d.get("confidence", 1.0)
+    out = {}
+    for label, conf in found.items():
+        try:
+            out[label] = float(conf)
+        except (TypeError, ValueError):
+            out[label] = 1.0
+    return out
+
+
+def on_detections(detections):
+    global person_last_seen, person_since, last_report
+    try:
+        found = labels_in(detections)
+        conf = found.get("person", 0.0)
+        if conf > 1.0:
+            conf /= 100.0           # some versions report percent
+        now = time.time()
+        with lock:
+            if camera["reports"] == 0:
+                print("camera: first report from the Brick:", repr(detections)[:300])
+            camera["reports"] += 1
+            camera["state"] = "watching"
+            camera["detail"] = ""
+            camera["labels"] = sorted(found)[:6]
+            last_report = now
+            if conf >= PERSON_CONFIDENCE:
+                if now - person_last_seen > PRESENT_HOLD_S:
+                    person_since = now
+                person_last_seen = now
+    except Exception as e:
+        camera["detail"] = f"{type(e).__name__}: {e}"[:200]
+        print("camera: could not read a report:", e, repr(detections)[:300])
+
+
+if USE_CAMERA:
+    camera["state"] = "starting"
+    try:
+        from arduino.app_bricks.video_objectdetection import VideoObjectDetection
+        detector = VideoObjectDetection(confidence=0.3, debounce_sec=0.0)
+        detector.on_detect_all(on_detections)
+    except Exception as e:
+        camera.update(state="unavailable", detail=f"{type(e).__name__}: {e}"[:200])
+        print("camera unavailable:", e)
+
+
 # ---------- once a second: is the sensor actually sending? ----------
 
 def loop():
@@ -330,10 +456,39 @@ def loop():
     with lock:
         status["rate"] = samples_this_second
         samples_this_second = 0
-        if time.time() - last_sample_time > 2.0:
+        now = time.time()
+        if now - last_sample_time > 2.0:
             status["sensor"] = "no_data"
+
+        global rest
+        ended = False
+        camera["present"] = camera["state"] == "watching" and now - person_last_seen <= PRESENT_HOLD_S
+        if (AUTO_MEALS and meal is None and camera["present"] and gravity is not None
+                and now - person_since >= SIT_S):
+            rest = gravity                      # the hand's position right now is "resting"
+            start_meal()
+            meal["seen_person"] = True
+        if meal is not None and camera["state"] == "watching":
+            if camera["present"]:
+                meal["seen_person"] = True
+                meal["away_run"] = 0.0
+            elif meal["seen_person"]:       # only count absence once the camera has seen them
+                meal["away"] += 1.0
+                meal["away_run"] += 1.0
+                if meal["away_run"] >= AUTO_END_AWAY_S:
+                    meal["away"] -= meal["away_run"]
+                    end_meal(trim=meal["away_run"])
+                    ended = True
+        starts_in = None
+        if AUTO_MEALS and meal is None and camera["present"]:
+            starts_in = max(0, math.ceil(SIT_S - (now - person_since)))
+        status["camera"] = dict(camera, away_run=round(meal["away_run"]) if meal else 0,
+                                starts_in=starts_in, sit_s=SIT_S, end_s=AUTO_END_AWAY_S,
+                                age=round(now - last_report) if last_report else None)
         snapshot = dict(status)
     ui.send_message("status", snapshot)
+    if ended and last_live:
+        ui.send_message("live", dict(last_live, meal_active=False))
 
 
 load_sessions()
