@@ -1,3 +1,9 @@
+UPDATE: 
+Placed 3rd in N+1/Qualcomm Track for MadHacks26!
+
+https://devpost.com/software/let-s-dig-in?_gl=1*14lemx8*_gcl_au*MTk4OTEyNTIyMS4xNzk0NzU3MTMz*_ga*MTczMTEzMjcxMC4xNzk0NzU3MTMz*_ga_0YHJK3Y10M*czE3OTUwMjU0MTMkbzUkZzEkdDE3OTUwMjU0ODkkajYwJGwwJGgw
+
+>>-----------<<
 Let's Dig In
 Every meal is a checkup. A wrist-worn tracker that measures hand tremors and eating pace during meals, running entirely on an Arduino UNO Q.
 Built at MadHacks 2026.
